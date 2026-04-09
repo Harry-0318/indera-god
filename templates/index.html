@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Indera Robotic Arm Control</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">INDERA <span>MISSION CONTROL</span></div>
+            <div class="status-bar">
+                <span id="serial-status" class="status-dot"></span>
+                <span id="status-text">SYSTEM READY</span>
+            </div>
+        </header>
+
+        <main>
+            <section class="control-panel">
+                <div class="panel-header">
+                    <h2>JOINT POSITIONING</h2>
+                    <p>Move sliders to set target. Command sends after 3s of inactivity or Space/Enter.</p>
+                </div>
+                
+                <div class="sliders-grid">
+                    <!-- Base Servo -->
+                    <div class="control-card" data-joint="B">
+                        <label>Base</label>
+                        <div class="slider-wrapper">
+                            <input type="range" min="0" max="180" value="90" class="joint-slider" id="slider-B">
+                            <div class="value-display">90°</div>
+                        </div>
+                        <div class="queue-indicator" id="queue-B"></div>
+                    </div>
+
+                    <!-- Shoulder Servo -->
+                    <div class="control-card" data-joint="S">
+                        <label>Shoulder</label>
+                        <div class="slider-wrapper">
+                            <input type="range" min="20" max="160" value="90" class="joint-slider" id="slider-S">
+                            <div class="value-display">90°</div>
+                        </div>
+                        <div class="queue-indicator" id="queue-S"></div>
+                    </div>
+
+                    <!-- Elbow Servo -->
+                    <div class="control-card" data-joint="E">
+                        <label>Elbow</label>
+                        <div class="slider-wrapper">
+                            <input type="range" min="15" max="165" value="160" class="joint-slider" id="slider-E">
+                            <div class="value-display">160°</div>
+                        </div>
+                        <div class="queue-indicator" id="queue-E"></div>
+                    </div>
+
+                    <!-- Wrist Pitch -->
+                    <div class="control-card" data-joint="W">
+                        <label>Wrist Pitch</label>
+                        <div class="slider-wrapper">
+                            <input type="range" min="0" max="180" value="90" class="joint-slider" id="slider-W">
+                            <div class="value-display">90°</div>
+                        </div>
+                        <div class="queue-indicator" id="queue-W"></div>
+                    </div>
+
+                    <!-- Wrist Roll -->
+                    <div class="control-card" data-joint="R">
+                        <label>Wrist Roll</label>
+                        <div class="slider-wrapper">
+                            <input type="range" min="0" max="180" value="90" class="joint-slider" id="slider-R">
+                            <div class="value-display">90°</div>
+                        </div>
+                        <div class="queue-indicator" id="queue-R"></div>
+                    </div>
+
+                    <!-- Gripper -->
+                    <div class="control-card" data-joint="G">
+                        <label>Gripper</label>
+                        <div class="slider-wrapper">
+                            <input type="range" min="80" max="180" value="180" class="joint-slider" id="slider-G">
+                            <div class="value-display">180°</div>
+                        </div>
+                        <div class="queue-indicator" id="queue-G"></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="side-panel">
+                <div class="motor-section">
+                    <h3>DC MOTOR SPEED</h3>
+                    <div class="control-card" data-joint="M">
+                        <div class="slider-wrapper vertical">
+                            <input type="range" min="-255" max="255" value="0" class="joint-slider motor-slider" id="slider-M">
+                            <div class="value-display" id="motor-val">0</div>
+                        </div>
+                        <button id="stop-motor" class="btn-stop">EMERGENCY STOP</button>
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button id="btn-send-all" class="btn-primary">SEND ALL PENDING [SPACE]</button>
+                    <button id="btn-home" class="btn-secondary">HOME ARM [H]</button>
+                    <div class="shortcut-tip">Tip: Commands send automatically after 3s of inactivity.</div>
+                </div>
+                
+                <div class="log-container">
+                    <h3>CMD LOG</h3>
+                    <div id="cmd-log"></div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

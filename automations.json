@@ -1,0 +1,24 @@
+[
+    {
+        "id": "1fb576d4-3862-45e2-bd47-42560374c93e",
+        "name": "stop-motor-to-pickup",
+        "sensor_type": "ultrasonic",
+        "threshold_cm": 6.0,
+        "delay_ms": 950,
+        "cooldown_ms": 5000,
+        "action_type": "stop_motor",
+        "workflow_name": "",
+        "enabled": true
+    },
+    {
+        "id": "0862cd6c-aa08-428f-8637-6a6998de684e",
+        "name": "pickup-after-stop-m",
+        "sensor_type": "ultrasonic",
+        "threshold_cm": 6.0,
+        "delay_ms": 1500,
+        "cooldown_ms": 5000,
+        "action_type": "run_workflow",
+        "workflow_name": "Pick and Drop Green",
+        "enabled": true
+    }
+]

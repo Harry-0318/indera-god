@@ -3,31 +3,220 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Indera Robotic Arm Control</title>
+    <title>Indera Mission Control</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <div class="logo">INDERA <span>MISSION CONTROL</span></div>
-            <div class="status-bar">
-                <span id="serial-status" class="status-dot"></span>
-                <span id="status-text">SYSTEM READY</span>
+    <div class="page-shell">
+        <div class="ambient ambient-a"></div>
+        <div class="ambient ambient-b"></div>
+
+        <header class="topbar">
+            <div>
+                <p class="eyebrow">Indera Robotics</p>
+                <h1>Mission Control</h1>
+                <p class="subtitle">Manual control, saved sequences, and configurable ultrasonic-trigger automations.</p>
+            </div>
+            <div class="status-cluster">
+                <div class="status-chip">
+                    <span id="serial-status" class="status-dot"></span>
+                    <span id="status-text">Booting</span>
+                </div>
+                <div class="status-chip">
+                    <span class="chip-label">Distance</span>
+                    <span id="distance-pill">-- cm</span>
+                </div>
             </div>
         </header>
 
-        <main>
-            <section class="control-panel">
-                <div class="panel-header">
-                    <h2>JOINT POSITIONING</h2>
-                    <p>Move sliders to set target. Command sends after 3s of inactivity or Space/Enter.</p>
+        <main class="dashboard">
+            <section class="hero-grid">
+                <article class="panel telemetry-panel">
+                    <div class="panel-head">
+                        <div>
+                            <p class="eyebrow">Live Sensor</p>
+                            <h2>Ultrasonic Telemetry</h2>
+                        </div>
+                        <span id="sensor-mode" class="sensor-state">Idle</span>
+                    </div>
+                    <div class="telemetry-layout">
+                        <div class="distance-card">
+                            <div class="distance-value"><span id="distance-reading">--</span><small>cm</small></div>
+                            <p id="distance-detail">Waiting for sensor data.</p>
+                        </div>
+                        <div class="telemetry-meta">
+                            <div class="meta-row">
+                                <span>Last update</span>
+                                <strong id="sensor-last-updated">--</strong>
+                            </div>
+                            <div class="meta-row">
+                                <span>Raw line</span>
+                                <strong id="sensor-raw-line">--</strong>
+                            </div>
+                            <div class="meta-row">
+                                <span>Pending automations</span>
+                                <strong id="pending-automation-count">0</strong>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="panel automation-form-panel">
+                    <div class="panel-head">
+                        <div>
+                            <p class="eyebrow">Automation Studio</p>
+                            <h2>Sensor Trigger Rule</h2>
+                        </div>
+                        <span id="automation-form-mode" class="panel-tag">New Rule</span>
+                    </div>
+                    <div class="automation-grid">
+                        <label class="field">
+                            <span>Rule name</span>
+                            <input type="text" id="automation-name" placeholder="Stop motor near pickup">
+                        </label>
+                        <label class="field">
+                            <span>Threshold</span>
+                            <input type="number" id="automation-threshold" min="0.1" step="0.1" value="6">
+                        </label>
+                        <label class="field">
+                            <span>Delay after trigger</span>
+                            <input type="number" id="automation-delay" min="0" step="100" value="1500">
+                        </label>
+                        <label class="field">
+                            <span>Cooldown</span>
+                            <input type="number" id="automation-cooldown" min="0" step="100" value="5000">
+                        </label>
+                        <label class="field">
+                            <span>Action</span>
+                            <select id="automation-action">
+                                <option value="stop_motor">Stop motor</option>
+                                <option value="run_workflow">Run workflow</option>
+                                <option value="home_arm">Home arm</option>
+                            </select>
+                        </label>
+                        <label class="field" id="automation-workflow-field">
+                            <span>Workflow</span>
+                            <select id="automation-workflow"></select>
+                        </label>
+                    </div>
+                    <label class="toggle-row">
+                        <input type="checkbox" id="automation-enabled" checked>
+                        <span>Rule enabled</span>
+                    </label>
+                    <div class="panel-actions">
+                        <button id="btn-save-automation" class="btn-primary">Save Rule</button>
+                        <button id="btn-reset-automation" class="btn-ghost">Reset Form</button>
+                    </div>
+                    <p class="form-note">Behavior: one ultrasonic reading below the threshold is enough to schedule the action. Recovery above threshold does not cancel the pending action.</p>
+                </article>
+            </section>
+
+            <section class="workspace-grid">
+                <article class="panel saved-automations-panel">
+                    <div class="panel-head">
+                        <div>
+                            <p class="eyebrow">Automation Studio</p>
+                            <h2>Saved Trigger Rules</h2>
+                        </div>
+                    </div>
+                    <div id="automation-list" class="stack-list"></div>
+                </article>
+
+                <article class="panel workflow-library-panel">
+                    <div class="panel-head">
+                        <div>
+                            <p class="eyebrow">Workflow Library</p>
+                            <h2>Saved Sequences</h2>
+                        </div>
+                    </div>
+                    <div id="wf-list" class="stack-list"></div>
+                </article>
+
+                <article class="panel workflow-builder-panel">
+                    <div class="panel-head">
+                        <div>
+                            <p class="eyebrow">Workflow Builder</p>
+                            <h2>Sequence Composer</h2>
+                        </div>
+                        <button id="btn-clear-wf" class="btn-text">Clear</button>
+                    </div>
+
+                    <div class="builder-layout">
+                        <div class="builder-column">
+                            <h3>Blocks</h3>
+                            <div id="available-positions" class="block-list"></div>
+                            <div class="wait-creator">
+                                <input type="number" id="wait-duration" value="1" step="0.1" min="0.1">
+                                <button id="btn-add-wait" class="btn-ghost compact">+ Wait</button>
+                            </div>
+                        </div>
+                        <div class="builder-column wide">
+                            <h3>Sequence</h3>
+                            <div id="wf-sequence" class="sequence-list"></div>
+                            <div class="workflow-actions">
+                                <input type="text" id="wf-name" placeholder="Name workflow...">
+                                <button id="btn-save-wf" class="btn-primary compact">Save</button>
+                                <button id="btn-run-wf" class="btn-success compact">Run</button>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="control-grid">
+                <article class="panel position-library-panel">
+                    <div class="panel-head">
+                        <div>
+                            <p class="eyebrow">Pose Memory</p>
+                            <h2>Position Library</h2>
+                        </div>
+                    </div>
+                    <div class="panel-actions inline">
+                        <input type="text" id="pos-name" placeholder="Name position...">
+                        <button id="btn-save-pos" class="btn-primary compact">Save</button>
+                    </div>
+                    <div id="saved-positions" class="stack-list small-list"></div>
+                </article>
+
+                <article class="panel motor-panel">
+                    <div class="panel-head">
+                        <div>
+                            <p class="eyebrow">Transport</p>
+                            <h2>DC Motor</h2>
+                        </div>
+                    </div>
+                    <div class="motor-card control-card" data-joint="M">
+                        <label>Motor speed</label>
+                        <div class="slider-wrapper">
+                            <input type="range" min="-255" max="255" value="0" class="joint-slider motor-slider" id="slider-M">
+                            <div class="value-display" id="motor-val">0</div>
+                        </div>
+                        <button id="stop-motor" class="btn-danger">E-Stop / M:0</button>
+                    </div>
+                    <div class="calibration-buttons">
+                        <button class="btn-ghost compact btn-cal" data-joint="B">Base</button>
+                        <button class="btn-ghost compact btn-cal" data-joint="S">Shoulder</button>
+                        <button class="btn-ghost compact btn-cal" data-joint="E">Elbow</button>
+                        <button class="btn-ghost compact btn-cal" data-joint="W">Wrist P</button>
+                        <button class="btn-ghost compact btn-cal" data-joint="R">Wrist R</button>
+                        <button class="btn-ghost compact btn-cal" data-joint="G">Grip</button>
+                    </div>
+                    <button id="btn-home" class="btn-secondary">Home All Joints</button>
+                </article>
+            </section>
+
+            <section class="panel positioning-panel">
+                <div class="panel-head">
+                    <div>
+                        <p class="eyebrow">Joint Positioning</p>
+                        <h2>Manual Axis Control</h2>
+                    </div>
+                    <button id="btn-send-all" class="btn-primary compact">Send Pending</button>
                 </div>
-                
                 <div class="sliders-grid">
-                    <!-- Base Servo -->
                     <div class="control-card" data-joint="B">
                         <label>Base</label>
                         <div class="slider-wrapper">
@@ -36,8 +225,6 @@
                         </div>
                         <div class="queue-indicator" id="queue-B"></div>
                     </div>
-
-                    <!-- Shoulder Servo -->
                     <div class="control-card" data-joint="S">
                         <label>Shoulder</label>
                         <div class="slider-wrapper">
@@ -46,8 +233,6 @@
                         </div>
                         <div class="queue-indicator" id="queue-S"></div>
                     </div>
-
-                    <!-- Elbow Servo -->
                     <div class="control-card" data-joint="E">
                         <label>Elbow</label>
                         <div class="slider-wrapper">
@@ -56,8 +241,6 @@
                         </div>
                         <div class="queue-indicator" id="queue-E"></div>
                     </div>
-
-                    <!-- Wrist Pitch -->
                     <div class="control-card" data-joint="W">
                         <label>Wrist Pitch</label>
                         <div class="slider-wrapper">
@@ -66,8 +249,6 @@
                         </div>
                         <div class="queue-indicator" id="queue-W"></div>
                     </div>
-
-                    <!-- Wrist Roll -->
                     <div class="control-card" data-joint="R">
                         <label>Wrist Roll</label>
                         <div class="slider-wrapper">
@@ -76,8 +257,6 @@
                         </div>
                         <div class="queue-indicator" id="queue-R"></div>
                     </div>
-
-                    <!-- Gripper -->
                     <div class="control-card" data-joint="G">
                         <label>Gripper</label>
                         <div class="slider-wrapper">
@@ -89,31 +268,18 @@
                 </div>
             </section>
 
-            <section class="side-panel">
-                <div class="motor-section">
-                    <h3>DC MOTOR SPEED</h3>
-                    <div class="control-card" data-joint="M">
-                        <div class="slider-wrapper vertical">
-                            <input type="range" min="-255" max="255" value="0" class="joint-slider motor-slider" id="slider-M">
-                            <div class="value-display" id="motor-val">0</div>
-                        </div>
-                        <button id="stop-motor" class="btn-stop">EMERGENCY STOP</button>
+            <section class="panel log-panel">
+                <div class="panel-head">
+                    <div>
+                        <p class="eyebrow">Operator Feed</p>
+                        <h2>Command Log</h2>
                     </div>
                 </div>
-
-                <div class="actions">
-                    <button id="btn-send-all" class="btn-primary">SEND ALL PENDING [SPACE]</button>
-                    <button id="btn-home" class="btn-secondary">HOME ARM [H]</button>
-                    <div class="shortcut-tip">Tip: Commands send automatically after 3s of inactivity.</div>
-                </div>
-                
-                <div class="log-container">
-                    <h3>CMD LOG</h3>
-                    <div id="cmd-log"></div>
-                </div>
+                <div id="cmd-log"></div>
             </section>
         </main>
     </div>
+
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>

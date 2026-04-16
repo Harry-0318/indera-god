@@ -8,21 +8,31 @@ import serial
 from flask import Flask, jsonify, render_template, request
 
 import config
+from cv_detector import detect_color
+from state_store import RuntimeStateStore
 
 app = Flask(__name__)
 
 POSITIONS_FILE = "positions.json"
 WORKFLOWS_FILE = "workflows.json"
 AUTOMATIONS_FILE = "automations.json"
+STATE_FILE = "runtime_state.json"
 
 HOME_ANGLES = {"B": 90, "S": 90, "E": 160, "W": 90, "R": 90, "G": 180, "M": 0}
 JOINT_ORDER = ["B", "S", "E", "W", "R", "G", "M"]
 WORKFLOW_STEP_DELAY_SECONDS = 0.2
-
-
-def iso_timestamp(ts=None):
-    timestamp = ts if ts is not None else time.time()
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(timestamp))
+LCD_TEMP_MESSAGE_MS = 2500
+DEFAULT_DEMO_NAME = "Presentation Demo"
+DEMO_CONVEYOR_SPEED = 128
+DEMO_DETECT_DISTANCE_CM = 6
+DEMO_STOP_DELAY_MS = 800
+DEMO_REVERSE_SPEED = -200
+DEMO_REVERSE_MS = 2000
+DEMO_RED_WORKFLOW = "pd-red"
+DEMO_GREEN_WORKFLOW = "pd-green"
+DEFAULT_MOTOR_STOP_FACTOR = 150000
+CAMERA_INDEX = 0
+CAMERA_POLL_SECONDS = 0.25
 
 
 def load_data(filepath, default):
@@ -62,21 +72,17 @@ def save_automations(automations):
     save_data(AUTOMATIONS_FILE, automations)
 
 
-sensor_state_lock = threading.Lock()
 automations_lock = threading.Lock()
 ser1_lock = threading.Lock()
 ser2_lock = threading.Lock()
 
-sensor_state = {
-    "distance_cm": None,
-    "last_updated": None,
-    "last_raw": None,
-    "status": "idle",
-}
-
 automations_cache = load_automations()
 automation_runtime = {}
 ultrasonic_thread = None
+camera_thread = None
+demo_thread = None
+demo_stop_event = threading.Event()
+state_store = RuntimeStateStore(STATE_FILE, HOME_ANGLES)
 
 
 def init_runtime_state():
@@ -161,20 +167,10 @@ def serialize_automations():
     return serialized
 
 
-def update_sensor_state(distance_cm, raw_line):
-    with sensor_state_lock:
-        sensor_state["distance_cm"] = distance_cm
-        sensor_state["last_updated"] = time.time()
-        sensor_state["last_raw"] = raw_line
-        sensor_state["status"] = "tracking"
-
-
-def get_sensor_state_payload():
-    with sensor_state_lock:
-        state = dict(sensor_state)
-
-    state["automations"] = serialize_automations()
-    return state
+def get_state_payload():
+    payload = state_store.snapshot()
+    payload["automations"] = serialize_automations()
+    return payload
 
 
 def route_serial_for_command(cmd_id):
@@ -195,6 +191,20 @@ def write_serial(target_ser, command):
         target_ser.write(command.encode())
 
 
+def compact_lcd_text(text, limit=16):
+    clean = " ".join(str(text).strip().split())
+    return clean[:limit]
+
+
+def send_lcd_message(message, duration_ms=0):
+    if ser1 is None:
+        return
+
+    command = f"LCD:{int(max(0, duration_ms))}:{compact_lcd_text(message)}\n"
+    write_serial(ser1, command)
+    print(f"Sent to Arduino 1: {command.strip()} [lcd]")
+
+
 def send_joint_command(cmd_id, value, reason="manual"):
     target_ser, label = route_serial_for_command(cmd_id)
     if target_ser is None:
@@ -202,19 +212,29 @@ def send_joint_command(cmd_id, value, reason="manual"):
 
     command = f"{cmd_id}:{value}\n"
     write_serial(target_ser, command)
+    state_store.record_joint_command(cmd_id.upper(), value, reason, label)
     print(f"Sent to {label}: {command.strip()} [{reason}]")
+    return get_state_payload()
 
 
-def send_home_command():
+def send_home_command(reason="manual_home"):
     if ser1 is None and ser2 is None:
         raise RuntimeError("No Arduinos connected")
 
+    send_lcd_message("ARM HOMING", 4000)
+
+    targets = []
     if ser1:
         write_serial(ser1, "H\n")
+        targets.append("Arduino 1")
         print("Sent to Arduino 1: H [home_arm]")
     if ser2:
         write_serial(ser2, "H\n")
+        targets.append("Arduino 2")
         print("Sent to Arduino 2: H [home_arm]")
+
+    state_store.record_home_command(reason, ", ".join(targets))
+    return get_state_payload()
 
 
 def move_to_angles(angles, label):
@@ -223,6 +243,18 @@ def move_to_angles(angles, label):
             continue
         send_joint_command(joint_id, angles[joint_id], reason=f"sequence:{label}")
         time.sleep(WORKFLOW_STEP_DELAY_SECONDS)
+
+
+def compute_motor_wait_ms(speed, stop_factor=DEFAULT_MOTOR_STOP_FACTOR):
+    speed = int(speed)
+    stop_factor = int(stop_factor)
+
+    if speed == 0:
+        raise ValueError("Motor speed cannot be 0 for a speed-based motor step")
+    if stop_factor <= 0:
+        raise ValueError("Motor stop factor must be greater than 0")
+
+    return max(1, int(stop_factor / abs(speed)))
 
 
 def resolve_position(name):
@@ -235,22 +267,94 @@ def resolve_position(name):
     return positions[name]
 
 
-def execute_workflow_steps(steps, workflow_name, source):
-    print(f"Workflow started: {workflow_name} [{source}]")
+def normalize_sequence_steps(steps):
+    if not isinstance(steps, list) or len(steps) == 0:
+        raise ValueError("Workflow sequence must contain at least one step")
 
+    normalized = []
     for step in steps:
+        if not isinstance(step, dict):
+            raise ValueError("Workflow step must be an object")
+
         step_type = step.get("type")
-
         if step_type == "move":
-            position_name = step.get("name")
-            angles = resolve_position(position_name)
-            move_to_angles(angles, f"{workflow_name}:{position_name}")
+            name = step.get("name")
+            if not name:
+                raise ValueError("Move steps require a position name")
+            resolve_position(name)
+            normalized.append({"type": "move", "name": name})
         elif step_type == "wait":
-            duration_seconds = max(0, float(step.get("duration", 0)))
-            print(f"Workflow wait: {duration_seconds}s [{workflow_name}]")
-            time.sleep(duration_seconds)
+            duration = max(0, float(step.get("duration", 0)))
+            normalized.append({"type": "wait", "duration": duration})
+        elif step_type == "motor_run":
+            speed = int(step.get("speed", 0))
+            stop_factor = int(step.get("stop_factor", DEFAULT_MOTOR_STOP_FACTOR))
+            wait_ms = compute_motor_wait_ms(speed, stop_factor)
+            normalized.append({
+                "type": "motor_run",
+                "speed": speed,
+                "stop_factor": stop_factor,
+                "wait_ms": wait_ms,
+            })
+        else:
+            raise ValueError(f"Unsupported step type '{step_type}'")
 
-    print(f"Workflow completed: {workflow_name} [{source}]")
+    return normalized
+
+
+def execute_workflow_steps(steps, workflow_name, source):
+    total_steps = len(steps)
+    state_store.set_workflow_started(workflow_name, source, total_steps)
+    print(f"Workflow started: {workflow_name} [{source}]")
+    send_lcd_message(f"WF {workflow_name}", 0)
+
+    try:
+        for index, step in enumerate(steps, start=1):
+            step_type = step.get("type")
+
+            if step_type == "move":
+                position_name = step.get("name")
+                state_store.set_workflow_step(index, "move", position_name)
+                send_lcd_message(f"{index} MOVE {position_name}", 0)
+                angles = resolve_position(position_name)
+                move_to_angles(angles, f"{workflow_name}:{position_name}")
+            elif step_type == "wait":
+                duration_seconds = max(0, float(step.get("duration", 0)))
+                label = f"{duration_seconds}s"
+                state_store.set_workflow_step(index, "wait", label)
+                send_lcd_message(f"{index} WAIT {duration_seconds}s", 0)
+                print(f"Workflow wait: {duration_seconds}s [{workflow_name}]")
+                time.sleep(duration_seconds)
+            elif step_type == "motor_run":
+                speed = int(step["speed"])
+                wait_ms = int(step.get("wait_ms") or compute_motor_wait_ms(speed, step.get("stop_factor", DEFAULT_MOTOR_STOP_FACTOR)))
+                label = f"speed {speed} for {wait_ms}ms"
+                state_store.set_workflow_step(index, "motor_run", label)
+                send_lcd_message(f"{index} MOTOR {speed}", 0)
+                print(f"Workflow motor run: speed {speed}, wait {wait_ms}ms [{workflow_name}]")
+                send_joint_command("M", speed, reason=f"sequence:{workflow_name}:motor_run")
+                time.sleep(wait_ms / 1000)
+                send_joint_command("M", 0, reason=f"sequence:{workflow_name}:motor_stop")
+                send_lcd_message("MOTOR AUTO STOP", 1800)
+
+        state_store.set_workflow_complete(workflow_name)
+        send_lcd_message("WF COMPLETE", 3500)
+        print(f"Workflow completed: {workflow_name} [{source}]")
+    except Exception as exc:
+        state_store.set_workflow_failed(workflow_name, str(exc))
+        send_lcd_message("WF ERROR", 3500)
+        print(f"Workflow error: {workflow_name} [{source}] -> {exc}")
+        raise
+
+
+def run_sequence_async(steps, workflow_name, source="manual"):
+    normalized_steps = normalize_sequence_steps(steps)
+    worker = threading.Thread(
+        target=execute_workflow_steps,
+        args=(normalized_steps, workflow_name, source),
+        daemon=True,
+    )
+    worker.start()
 
 
 def run_saved_workflow_async(workflow_name, source="manual"):
@@ -258,12 +362,103 @@ def run_saved_workflow_async(workflow_name, source="manual"):
     if workflow_name not in workflows:
         raise ValueError(f"Workflow '{workflow_name}' not found")
 
-    worker = threading.Thread(
-        target=execute_workflow_steps,
-        args=(workflows[workflow_name], workflow_name, source),
+    run_sequence_async(workflows[workflow_name], workflow_name, source)
+
+
+def run_motor_for_duration(speed, duration_ms, reason):
+    send_joint_command("M", speed, reason=reason)
+    time.sleep(max(0, duration_ms) / 1000)
+    send_joint_command("M", 0, reason=f"{reason}:stop")
+
+
+def execute_demo_mode(demo_name):
+    state_store.set_demo_started(demo_name, "pd-red / pd-green")
+    send_lcd_message("DEMO MODE", 0)
+    print(f"Demo mode started: {demo_name}")
+
+    try:
+        send_home_command(reason="demo_mode_home")
+        time.sleep(2.0)
+        workflows = load_workflows()
+        missing = [name for name in [DEMO_RED_WORKFLOW, DEMO_GREEN_WORKFLOW] if name not in workflows]
+        if missing:
+            raise ValueError(f"Missing demo workflow(s): {', '.join(missing)}")
+
+        while not demo_stop_event.is_set():
+            state_store.set_demo_phase("feeding", "Conveyor running at M:128")
+            send_lcd_message("CONVEYOR 128", 0)
+            send_joint_command("M", DEMO_CONVEYOR_SPEED, reason="demo_mode_feed")
+
+            while not demo_stop_event.is_set():
+                state = state_store.snapshot()
+                distance_cm = state.get("sensor", {}).get("distance_cm")
+                if distance_cm is not None and distance_cm < DEMO_DETECT_DISTANCE_CM:
+                    break
+                time.sleep(0.05)
+
+            if demo_stop_event.is_set():
+                break
+
+            state_store.set_demo_phase("detected", f"Object detected under {DEMO_DETECT_DISTANCE_CM} cm")
+            send_lcd_message("OBJECT DETECTED", 0)
+            time.sleep(DEMO_STOP_DELAY_MS / 1000)
+            send_joint_command("M", 0, reason="demo_mode_detect_stop")
+
+            state = state_store.snapshot()
+            color_name = (state.get("sensor", {}).get("color_name") or "UNKNOWN").upper()
+
+            if color_name == "RED":
+                state_store.set_demo_phase("red_branch", f"Running {DEMO_RED_WORKFLOW}")
+                send_lcd_message("RED -> PD RED", 0)
+                execute_workflow_steps(workflows[DEMO_RED_WORKFLOW], DEMO_RED_WORKFLOW, "demo_mode")
+            elif color_name == "GREEN":
+                state_store.set_demo_phase("green_branch", f"Running {DEMO_GREEN_WORKFLOW}")
+                send_lcd_message("GRN -> PD GRN", 0)
+                execute_workflow_steps(workflows[DEMO_GREEN_WORKFLOW], DEMO_GREEN_WORKFLOW, "demo_mode")
+            else:
+                state_store.set_demo_phase("reject_branch", f"Rejecting {color_name}")
+                send_lcd_message(f"REJECT {color_name}", 0)
+                run_motor_for_duration(DEMO_REVERSE_SPEED, DEMO_REVERSE_MS, "demo_mode_reject")
+
+            state_store.set_demo_phase("restart_feed", "Restarting conveyor")
+            send_lcd_message("RESTART FEED", 1200)
+            time.sleep(0.3)
+
+        send_joint_command("M", 0, reason="demo_mode_shutdown")
+        state_store.set_demo_stopped(f"{demo_name} stopped")
+        send_lcd_message("DEMO STOPPED", 2500)
+        print(f"Demo mode stopped: {demo_name}")
+    except Exception as exc:
+        state_store.set_demo_failed(str(exc))
+        try:
+            send_joint_command("M", 0, reason="demo_mode_error_stop")
+        except Exception:
+            pass
+        send_lcd_message("DEMO ERROR", 3500)
+        print(f"Demo mode failed: {demo_name} -> {exc}")
+
+
+def start_demo_mode_async(demo_name=DEFAULT_DEMO_NAME):
+    global demo_thread
+    state = state_store.snapshot()
+    if state.get("demo", {}).get("status") == "running":
+        raise RuntimeError("Demo mode is already running")
+
+    demo_stop_event.clear()
+    demo_thread = threading.Thread(
+        target=execute_demo_mode,
+        args=(demo_name,),
         daemon=True,
     )
-    worker.start()
+    demo_thread.start()
+
+
+def stop_demo_mode():
+    state = state_store.snapshot()
+    if state.get("demo", {}).get("status") != "running":
+        raise RuntimeError("Demo mode is not running")
+
+    demo_stop_event.set()
 
 
 def execute_automation_action(automation):
@@ -271,10 +466,11 @@ def execute_automation_action(automation):
 
     if action_type == "stop_motor":
         send_joint_command("M", 0, reason=f"automation:{automation['name']}")
+        send_lcd_message("MOTOR STOPPED", 3500)
         return "Motor stopped"
 
     if action_type == "home_arm":
-        send_home_command()
+        send_home_command(reason=f"automation:{automation['name']}")
         return "Home command sent"
 
     if action_type == "run_workflow":
@@ -311,13 +507,26 @@ def schedule_automation(automation, distance_cm):
         return
 
     delay_seconds = max(0, int(automation.get("delay_ms", 0) or 0)) / 1000
-    runtime["pending_for"] = now + delay_seconds
+    pending_for = now + delay_seconds
+    runtime["pending_for"] = pending_for
     runtime["last_result"] = f"Scheduled at {distance_cm:.1f} cm"
+    state_store.set_automation_pending(
+        automation_id,
+        automation["name"],
+        pending_for,
+        f"Scheduled at {distance_cm:.1f} cm",
+    )
 
     timer = threading.Timer(delay_seconds, fire_automation, args=(automation_id,))
     timer.daemon = True
     runtime["timer"] = timer
     timer.start()
+
+    if delay_seconds > 0:
+        send_lcd_message(f"AUTO IN {delay_seconds:.1f}s", int(delay_seconds * 1000) + 500)
+    else:
+        send_lcd_message("AUTO TRIGGERED", LCD_TEMP_MESSAGE_MS)
+
     print(
         f"Automation scheduled: {automation['name']} in "
         f"{int(delay_seconds * 1000)} ms at {distance_cm:.1f} cm"
@@ -333,18 +542,23 @@ def fire_automation(automation_id):
     runtime["timer"] = None
     runtime["pending_for"] = None
     runtime["last_triggered_at"] = time.time()
+    state_store.clear_automation_pending()
 
     if automation is None or not automation.get("enabled", True):
-        runtime["last_result"] = "Skipped because rule was removed or disabled"
+        message = "Skipped because rule was removed or disabled"
+        runtime["last_result"] = message
         runtime["last_completed_at"] = time.time()
+        state_store.set_automation_result(automation_id, "", message)
         return
 
     try:
         result = execute_automation_action(automation)
         runtime["last_result"] = result
+        state_store.set_automation_result(automation_id, automation["name"], result)
         print(f"Automation executed: {automation['name']} -> {result}")
     except Exception as exc:
         runtime["last_result"] = f"Error: {exc}"
+        state_store.set_automation_result(automation_id, automation["name"], f"Error: {exc}")
         print(f"Automation error: {automation['name']} -> {exc}")
     finally:
         runtime["last_completed_at"] = time.time()
@@ -366,7 +580,7 @@ def process_ultrasonic_distance(distance_cm):
             schedule_automation(automation, distance_cm)
 
 
-def monitor_ultrasonic_distance():
+def monitor_arduino_1_stream():
     while ser1:
         try:
             with ser1_lock:
@@ -377,33 +591,67 @@ def monitor_ultrasonic_distance():
                 continue
 
             line = raw_line.decode(errors="ignore").strip()
-            if not line.startswith("D:"):
+            if line.startswith("D:"):
+                distance_cm = float(line.split(":", 1)[1])
+                state_store.record_sensor(distance_cm, line)
+                process_ultrasonic_distance(distance_cm)
                 continue
-
-            distance_cm = float(line.split(":", 1)[1])
-            update_sensor_state(distance_cm, line)
-            process_ultrasonic_distance(distance_cm)
         except Exception as exc:
-            with sensor_state_lock:
-                sensor_state["status"] = f"error: {exc}"
+            state_store.record_sensor_error(f"error: {exc}")
             print(f"Ultrasonic monitor error: {exc}")
             time.sleep(0.25)
 
 
+def monitor_camera_color():
+    try:
+        import cv2
+    except ImportError as exc:
+        state_store.record_color("CV_UNAVAILABLE", 0, f"CV:{exc}")
+        print(f"Camera color monitor unavailable: {exc}")
+        return
+
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    if not cap.isOpened():
+        state_store.record_color("CAMERA_OFFLINE", 0, "CV:camera_offline")
+        print("Camera color monitor unavailable: camera not opened")
+        return
+
+    while True:
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                state_store.record_color("CAMERA_READ_FAIL", 0, "CV:read_fail")
+                time.sleep(CAMERA_POLL_SECONDS)
+                continue
+
+            result = detect_color(frame)
+            state_store.record_color(
+                result["color_name"],
+                result["area"],
+                f"CV:{result['color_name']}:{result['area']}",
+            )
+            time.sleep(CAMERA_POLL_SECONDS)
+        except Exception as exc:
+            state_store.record_color("CV_ERROR", 0, f"CV:{exc}")
+            print(f"Camera color monitor error: {exc}")
+            time.sleep(CAMERA_POLL_SECONDS)
+
+
 def start_background_workers():
     global ultrasonic_thread
+    global camera_thread
 
     if not ser1:
-        with sensor_state_lock:
-            sensor_state["status"] = "arduino_1_not_connected"
-        return
+        state_store.record_sensor_error("arduino_1_not_connected")
+    elif not ultrasonic_thread or not ultrasonic_thread.is_alive():
+        ultrasonic_thread = threading.Thread(target=monitor_arduino_1_stream, daemon=True)
+        ultrasonic_thread.start()
+        print("Ultrasonic monitoring thread started")
 
-    if ultrasonic_thread and ultrasonic_thread.is_alive():
-        return
-
-    ultrasonic_thread = threading.Thread(target=monitor_ultrasonic_distance, daemon=True)
-    ultrasonic_thread.start()
-    print("Ultrasonic monitoring thread started")
+    if not camera_thread or not camera_thread.is_alive():
+        camera_thread = threading.Thread(target=monitor_camera_color, daemon=True)
+        camera_thread.start()
+        print("Camera color monitoring thread started")
 
 
 def sanitize_automation_payload(data):
@@ -445,7 +693,6 @@ def sanitize_automation_payload(data):
     return automation
 
 
-# Initialize Serial Connections
 try:
     ser1 = serial.Serial(config.SERIAL_PORT_1, config.BAUD_RATE, timeout=0.1)
     print(f"Connected to Arduino 1 on {config.SERIAL_PORT_1}")
@@ -460,15 +707,18 @@ except Exception as exc:
     print(f"Could not connect to Arduino 2: {exc}")
     ser2 = None
 
+state_store.set_connections(ser1 is not None, ser2 is not None)
+
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
+@app.route("/state", methods=["GET"])
 @app.route("/sensor_state", methods=["GET"])
-def get_sensor_state():
-    return jsonify(get_sensor_state_payload())
+def get_state():
+    return jsonify(get_state_payload())
 
 
 @app.route("/send_command", methods=["POST"])
@@ -481,21 +731,21 @@ def send_command():
         return jsonify({"status": "error", "message": "Invalid command"}), 400
 
     try:
-        send_joint_command(cmd_id, value)
+        state = send_joint_command(cmd_id, value)
     except RuntimeError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 500
 
-    return jsonify({"status": "success", "command": f"{cmd_id}:{value}"})
+    return jsonify({"status": "success", "command": f"{cmd_id}:{value}", "state": state})
 
 
 @app.route("/home", methods=["POST"])
 def home_arm():
     try:
-        send_home_command()
+        state = send_home_command(reason="manual_home")
     except RuntimeError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 500
 
-    return jsonify({"status": "success", "message": "Home command sent"})
+    return jsonify({"status": "success", "message": "Home command sent", "state": state})
 
 
 @app.route("/positions", methods=["GET"])
@@ -545,8 +795,9 @@ def save_wf():
     if not name or steps is None:
         return jsonify({"status": "error", "message": "Missing name or steps"}), 400
 
+    normalized_steps = normalize_sequence_steps(steps)
     workflows = load_workflows()
-    workflows[name] = steps
+    workflows[name] = normalized_steps
     save_data(WORKFLOWS_FILE, workflows)
     return jsonify({"status": "success", "message": f"Workflow '{name}' saved"})
 
@@ -575,7 +826,51 @@ def run_workflow():
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 404
 
-    return jsonify({"status": "success", "message": f"Workflow '{name}' started"})
+    return jsonify({"status": "success", "message": f"Workflow '{name}' started", "state": get_state_payload()})
+
+
+@app.route("/run_sequence", methods=["POST"])
+def run_sequence():
+    data = request.json or {}
+    steps = data.get("steps")
+    name = (data.get("name") or "Draft Workflow").strip() or "Draft Workflow"
+
+    try:
+        run_sequence_async(steps, name, source="draft")
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
+    return jsonify({"status": "success", "message": f"Sequence '{name}' started", "state": get_state_payload()})
+
+
+@app.route("/demo_mode/start", methods=["POST"])
+def start_demo_mode():
+    try:
+        start_demo_mode_async()
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 404
+    except RuntimeError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 409
+
+    return jsonify({
+        "status": "success",
+        "message": "Hardcoded demo mode started",
+        "state": get_state_payload(),
+    })
+
+
+@app.route("/demo_mode/stop", methods=["POST"])
+def stop_demo_mode_route():
+    try:
+        stop_demo_mode()
+    except RuntimeError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 409
+
+    return jsonify({
+        "status": "success",
+        "message": "Demo mode stop requested",
+        "state": get_state_payload(),
+    })
 
 
 @app.route("/automations", methods=["GET"])
@@ -608,7 +903,7 @@ def save_automation():
 
     save_automations(new_automations)
     refresh_automation_cache(new_automations)
-    return jsonify({"status": "success", "automation": automation})
+    return jsonify({"status": "success", "automation": automation, "state": get_state_payload()})
 
 
 @app.route("/delete_automation", methods=["POST"])
@@ -627,7 +922,7 @@ def delete_automation():
 
     save_automations(new_automations)
     refresh_automation_cache(new_automations)
-    return jsonify({"status": "success"})
+    return jsonify({"status": "success", "state": get_state_payload()})
 
 
 if __name__ == "__main__":

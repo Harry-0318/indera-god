@@ -11,7 +11,7 @@ const String servoNames[6] = {"Base", "Shoulder", "Elbow", "Wrist Pitch", "Wrist
 
 // Safe limits [min, max]
 const int minLimit[6] = {0, 20, 15, 0, 0, 80};
-const int maxLimit[6] = {180, 160, 165, 180, 180, 180};
+const int maxLimit[6] = {180, 160, 180, 180, 180, 180};
 
 // Home positions   
 const int homePos[6] = {90, 90, 160, 90, 90, 180};
@@ -60,7 +60,7 @@ void printMenu() {
   Serial.println("Servo commands (Format -> X:angle):");
   Serial.println("  B:angle  - Move Base (0-180)");
   Serial.println("  S:angle  - Move Shoulder (20-160)");
-  Serial.println("  E:angle  - Move Elbow (15-165)");
+  Serial.println("  E:angle  - Move Elbow (15-180)");
   Serial.println("  W:angle  - Move Wrist pitch (0-180)");
   Serial.println("  R:angle  - Move Wrist roll (0-180)");
   Serial.println("  G:angle  - Move Gripper (120-180)");

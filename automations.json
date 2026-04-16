@@ -1,24 +1,24 @@
 [
     {
-        "id": "1fb576d4-3862-45e2-bd47-42560374c93e",
-        "name": "stop-motor-to-pickup",
+        "id": "a0ba3195-078d-4e32-ac22-4bfd91384605",
+        "name": "stop-motor-to-pick",
         "sensor_type": "ultrasonic",
         "threshold_cm": 6.0,
-        "delay_ms": 950,
+        "delay_ms": 1071,
         "cooldown_ms": 5000,
         "action_type": "stop_motor",
         "workflow_name": "",
-        "enabled": true
+        "enabled": false
     },
     {
-        "id": "0862cd6c-aa08-428f-8637-6a6998de684e",
-        "name": "pickup-after-stop-m",
+        "id": "e57b75d4-e4e9-4267-910e-bacbcf9fb996",
+        "name": "stop",
         "sensor_type": "ultrasonic",
         "threshold_cm": 6.0,
         "delay_ms": 1500,
         "cooldown_ms": 5000,
         "action_type": "run_workflow",
-        "workflow_name": "Pick and Drop Green",
-        "enabled": true
+        "workflow_name": "pd-green",
+        "enabled": false
     }
 ]

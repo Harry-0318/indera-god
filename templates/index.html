@@ -53,6 +53,14 @@
                                 <strong id="sensor-last-updated">--</strong>
                             </div>
                             <div class="meta-row">
+                                <span>Detected color</span>
+                                <strong id="sensor-color-name">UNKNOWN</strong>
+                            </div>
+                            <div class="meta-row">
+                                <span>Color area</span>
+                                <strong id="sensor-color-area">0</strong>
+                            </div>
+                            <div class="meta-row">
                                 <span>Raw line</span>
                                 <strong id="sensor-raw-line">--</strong>
                             </div>
@@ -112,6 +120,35 @@
                     </div>
                     <p class="form-note">Behavior: one ultrasonic reading below the threshold is enough to schedule the action. Recovery above threshold does not cancel the pending action.</p>
                 </article>
+
+                <article class="panel demo-panel">
+                    <div class="panel-head">
+                        <div>
+                            <p class="eyebrow">Presentation</p>
+                            <h2>Hardcoded Demo</h2>
+                        </div>
+                        <span id="demo-status-pill" class="panel-tag">Idle</span>
+                    </div>
+                    <p class="form-note">Flow: start conveyor at <code>M:128</code>, wait for ultrasonic trigger under <code>6 cm</code>, stop after <code>1000 ms</code>, branch by detected color, then restart feed.</p>
+                    <div class="panel-actions">
+                        <button id="btn-start-demo" class="btn-success">Start Demo Loop</button>
+                        <button id="btn-stop-demo" class="btn-danger">Stop Demo</button>
+                    </div>
+                    <div class="telemetry-meta demo-meta">
+                        <div class="meta-row">
+                            <span>Phase</span>
+                            <strong id="demo-phase">Ready</strong>
+                        </div>
+                        <div class="meta-row">
+                            <span>Branch workflows</span>
+                            <strong id="demo-workflow-label">--</strong>
+                        </div>
+                        <div class="meta-row">
+                            <span>Last result</span>
+                            <strong id="demo-last-result">No demo runs yet</strong>
+                        </div>
+                    </div>
+                </article>
             </section>
 
             <section class="workspace-grid">
@@ -151,6 +188,11 @@
                             <div class="wait-creator">
                                 <input type="number" id="wait-duration" value="1" step="0.1" min="0.1">
                                 <button id="btn-add-wait" class="btn-ghost compact">+ Wait</button>
+                            </div>
+                            <div class="wait-creator">
+                                <input type="number" id="motor-step-speed" value="140" step="5" min="-255" max="255">
+                                <input type="number" id="motor-step-factor" value="150000" step="1000" min="1">
+                                <button id="btn-add-motor-step" class="btn-ghost compact">+ Motor Auto</button>
                             </div>
                         </div>
                         <div class="builder-column wide">
@@ -236,7 +278,7 @@
                     <div class="control-card" data-joint="E">
                         <label>Elbow</label>
                         <div class="slider-wrapper">
-                            <input type="range" min="15" max="165" value="160" class="joint-slider" id="slider-E">
+                            <input type="range" min="15" max="180" value="160" class="joint-slider" id="slider-E">
                             <div class="value-display">160°</div>
                         </div>
                         <div class="queue-indicator" id="queue-E"></div>

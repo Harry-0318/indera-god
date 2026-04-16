@@ -4,3 +4,4 @@ __pycache__/
 
 positions.json
 workflows.json
+runtime_state.json

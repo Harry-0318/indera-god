@@ -1,14 +1,14 @@
 port: 3000
 defaults:
   runtime: tmux
-  agent: codex
+  agent: cursor
   workspace: worktree
   notifiers: []
 projects:
   indera-god:
     name: indera-god
     sessionPrefix: ig
-    repo: owner/repo
+    repo: Harry-0318/indera-god
     path: /Users/harshitsinghbhandari/Downloads/side-quests/indera-god
     defaultBranch: main
     agentRules: |-

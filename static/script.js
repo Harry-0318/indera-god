@@ -7,7 +7,9 @@ let workflowsCache = {};
 let automationsCache = [];
 let currentWorkflowSequence = [];
 let editingAutomationId = null;
-let sensorPollHandle = null;
+let statePollHandle = null;
+let runtimeState = null;
+const DEFAULT_MOTOR_STOP_FACTOR = 150000;
 
 function logCmd(message) {
     const log = document.getElementById('cmd-log');
@@ -55,6 +57,101 @@ function applyAnglesToUi(angles) {
     });
 }
 
+function applyRuntimeState(state) {
+    runtimeState = state;
+    if (!state) {
+        return;
+    }
+
+    const sensor = state.sensor || {};
+    const distance = sensor.distance_cm;
+    const distanceText = typeof distance === 'number' ? `${distance.toFixed(1)} cm` : '-- cm';
+
+    document.getElementById('distance-pill').textContent = distanceText;
+    document.getElementById('distance-reading').textContent = typeof distance === 'number' ? distance.toFixed(1) : '--';
+    document.getElementById('sensor-mode').textContent = sensor.status || 'Idle';
+    document.getElementById('sensor-last-updated').textContent = formatSensorTime(sensor.last_updated);
+    document.getElementById('sensor-color-name').textContent = sensor.color_name || 'UNKNOWN';
+    document.getElementById('sensor-color-area').textContent = String(sensor.color_area || 0);
+    document.getElementById('sensor-raw-line').textContent = sensor.last_raw || '--';
+
+    const execution = state.execution || {};
+    const automation = state.automation || {};
+    const pose = state.pose || {};
+    const demo = state.demo || {};
+    const executionText = execution.workflow_status === 'running'
+        ? `Executing ${execution.active_workflow || 'workflow'}`
+        : execution.workflow_status === 'completed'
+            ? `Completed ${execution.last_completed_workflow || 'workflow'}`
+            : execution.workflow_status === 'error'
+                ? execution.last_error || 'Workflow error'
+                : pose.status === 'unverified'
+                    ? 'Persisted pose is unverified. Re-home before trusting saved state.'
+                : typeof distance === 'number'
+                    ? sensor.detected ? 'Object detected inside threshold band.' : 'Sensor is tracking normally.'
+                    : 'Waiting for sensor data.';
+    document.getElementById('distance-detail').textContent = executionText;
+
+    const pendingCount = (state.automations || []).filter(item => item.runtime && item.runtime.is_pending).length;
+    document.getElementById('pending-automation-count').textContent = String(pendingCount);
+
+    automationsCache = state.automations || [];
+    renderAutomations();
+
+    const connections = state.connections || {};
+    const healthy = Boolean(connections.arduino_1_connected || connections.arduino_2_connected) &&
+        sensor.status !== 'arduino_1_not_connected' &&
+        !String(sensor.status || '').startsWith('error');
+
+    const statusText = execution.workflow_status === 'running'
+        ? `Running ${execution.active_workflow || 'workflow'}`
+        : demo.status === 'running'
+            ? `Demo mode running`
+        : healthy
+            ? 'System synchronized'
+            : sensor.status || 'Hardware offline';
+
+    setStatus(statusText, healthy);
+
+    syncSequenceHighlight(execution);
+    syncDemoUi(demo);
+}
+
+function syncDemoUi(demo) {
+    document.getElementById('demo-status-pill').textContent = demo.status || 'Idle';
+    document.getElementById('demo-phase').textContent = demo.status === 'running'
+        ? (demo.phase || 'Presentation sequence live')
+        : demo.status === 'completed'
+            ? 'Completed'
+            : demo.status === 'stopped'
+                ? 'Stopped'
+            : demo.status === 'error'
+                ? 'Error'
+                : 'Ready';
+    document.getElementById('demo-workflow-label').textContent = demo.workflow_name || '--';
+    document.getElementById('demo-last-result').textContent = demo.last_result || 'No demo runs yet';
+    document.getElementById('btn-start-demo').disabled = demo.status === 'running';
+    document.getElementById('btn-stop-demo').disabled = demo.status !== 'running';
+}
+
+function syncSequenceHighlight(execution) {
+    document.querySelectorAll('.sequence-item').forEach(item => item.classList.remove('active'));
+
+    if (!execution || execution.workflow_status !== 'running') {
+        return;
+    }
+
+    const index = execution.current_step_index;
+    if (!index) {
+        return;
+    }
+
+    const stepEl = document.getElementById(`wf-step-${index - 1}`);
+    if (stepEl) {
+        stepEl.classList.add('active');
+    }
+}
+
 function queueCommand(id, value) {
     if (timers[id]) {
         clearTimeout(timers[id].timeout);
@@ -93,13 +190,18 @@ async function sendCommand(id, value) {
     }
 
     try {
-        await requestJson('/send_command', {
+        const data = await requestJson('/send_command', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({id, value})
         });
+        const slider = document.getElementById(`slider-${id}`);
+        if (slider) {
+            slider.value = value;
+            updateSliderDisplay(slider);
+        }
+        applyRuntimeState(data.state);
         logCmd(`SENT ${id}:${value}`);
-        setStatus('System ready', true);
     } catch (error) {
         logCmd(`ERROR ${id}:${value} -> ${error.message}`);
         setStatus('Serial error', false);
@@ -117,7 +219,9 @@ async function sendAllPending() {
 
 async function goHome() {
     try {
-        await requestJson('/home', {method: 'POST'});
+        const data = await requestJson('/home', {method: 'POST'});
+        applyAnglesToUi(getHomeAngles());
+        applyRuntimeState(data.state);
         logCmd('HOME command sent');
     } catch (error) {
         logCmd(`ERROR home -> ${error.message}`);
@@ -228,7 +332,6 @@ async function goToPosition(name) {
         return;
     }
 
-    applyAnglesToUi(angles);
     logCmd(`MOVE -> ${name}`);
 
     for (const id of ['B', 'S', 'E', 'W', 'R', 'G', 'M']) {
@@ -255,6 +358,40 @@ function addWaitStep() {
     renderWorkflowSequence();
 }
 
+function computeMotorWaitMs(speed, stopFactor = DEFAULT_MOTOR_STOP_FACTOR) {
+    const numericSpeed = parseInt(speed, 10);
+    const numericFactor = parseInt(stopFactor, 10);
+
+    if (!numericSpeed) {
+        throw new Error('Motor speed cannot be 0');
+    }
+
+    return Math.max(1, Math.floor(numericFactor / Math.abs(numericSpeed)));
+}
+
+function addMotorStep() {
+    const speed = parseInt(document.getElementById('motor-step-speed').value, 10);
+    const stopFactor = parseInt(document.getElementById('motor-step-factor').value, 10);
+
+    if (!speed) {
+        alert('Motor step speed cannot be 0.');
+        return;
+    }
+
+    if (!stopFactor || stopFactor <= 0) {
+        alert('Motor stop factor must be greater than 0.');
+        return;
+    }
+
+    currentWorkflowSequence.push({
+        type: 'motor_run',
+        speed,
+        stop_factor: stopFactor,
+        wait_ms: computeMotorWaitMs(speed, stopFactor)
+    });
+    renderWorkflowSequence();
+}
+
 function removeStep(index) {
     currentWorkflowSequence.splice(index, 1);
     renderWorkflowSequence();
@@ -273,10 +410,25 @@ function renderWorkflowSequence() {
         const item = document.createElement('div');
         item.className = `sequence-item ${step.type}`;
         item.id = `wf-step-${index}`;
+        let title = '';
+        let subtitle = '';
+
+        if (step.type === 'move') {
+            title = `Move to ${step.name}`;
+            subtitle = 'Position step';
+        } else if (step.type === 'wait') {
+            title = `Wait ${step.duration}s`;
+            subtitle = 'Delay step';
+        } else if (step.type === 'motor_run') {
+            const waitMs = step.wait_ms || computeMotorWaitMs(step.speed, step.stop_factor || DEFAULT_MOTOR_STOP_FACTOR);
+            title = `Motor ${step.speed} -> auto stop`;
+            subtitle = `${waitMs} ms using factor ${step.stop_factor || DEFAULT_MOTOR_STOP_FACTOR}`;
+        }
+
         item.innerHTML = `
             <div>
-                <div class="item-title">${step.type === 'move' ? `Move to ${step.name}` : `Wait ${step.duration}s`}</div>
-                <div class="item-subtitle">${step.type === 'move' ? 'Position step' : 'Delay step'}</div>
+                <div class="item-title">${title}</div>
+                <div class="item-subtitle">${subtitle}</div>
             </div>
             <button class="btn-text" onclick="removeStep(${index})">Remove</button>
         `;
@@ -357,37 +509,45 @@ async function runWorkflow(sequence = null) {
         return;
     }
 
-    logCmd('WORKFLOW started');
-
-    for (let index = 0; index < steps.length; index += 1) {
-        const step = steps[index];
-        const element = document.getElementById(`wf-step-${index}`);
-        if (element) {
-            element.classList.add('active');
-        }
-
-        if (step.type === 'move') {
-            await goToPosition(step.name);
-        } else if (step.type === 'wait') {
-            logCmd(`WAIT ${step.duration}s`);
-            await new Promise(resolve => setTimeout(resolve, step.duration * 1000));
-        }
-
-        if (element) {
-            element.classList.remove('active');
-        }
-    }
-
-    logCmd('WORKFLOW complete');
+    const data = await requestJson('/run_sequence', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: 'Draft Workflow', steps})
+    });
+    applyRuntimeState(data.state);
+    logCmd(`WORKFLOW started -> ${data.message}`);
 }
 
 async function executeWorkflowByName(name) {
-    const steps = workflowsCache[name];
-    if (!steps) {
-        return;
-    }
+    const data = await requestJson('/run_workflow', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})
+    });
+    logCmd(`WORKFLOW started -> ${name}`);
+    applyRuntimeState(data.state);
+}
 
-    await runWorkflow(steps);
+async function startDemoMode() {
+    const data = await requestJson('/demo_mode/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({})
+    });
+
+    applyRuntimeState(data.state);
+    logCmd('DEMO started -> hardcoded loop');
+}
+
+async function stopDemoMode() {
+    const data = await requestJson('/demo_mode/stop', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({})
+    });
+
+    applyRuntimeState(data.state);
+    logCmd('DEMO stop requested');
 }
 
 async function deleteWorkflow(name) {
@@ -508,12 +668,13 @@ async function saveAutomation() {
         enabled: document.getElementById('automation-enabled').checked
     };
 
-    await requestJson('/save_automation', {
+    const data = await requestJson('/save_automation', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload)
     });
 
+    applyRuntimeState(data.state);
     resetAutomationForm();
     await loadAutomations();
     logCmd(`AUTOMATION saved -> ${payload.name}`);
@@ -537,12 +698,13 @@ async function toggleAutomation(id) {
         enabled: !automation.enabled
     };
 
-    await requestJson('/save_automation', {
+    const data = await requestJson('/save_automation', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload)
     });
 
+    applyRuntimeState(data.state);
     await loadAutomations();
     logCmd(`AUTOMATION ${payload.enabled ? 'enabled' : 'disabled'} -> ${payload.name}`);
 }
@@ -557,12 +719,13 @@ async function deleteAutomation(id) {
         return;
     }
 
-    await requestJson('/delete_automation', {
+    const data = await requestJson('/delete_automation', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({id})
     });
 
+    applyRuntimeState(data.state);
     if (editingAutomationId === id) {
         resetAutomationForm();
     }
@@ -584,29 +747,10 @@ function formatSensorTime(timestamp) {
     return date.toLocaleTimeString();
 }
 
-async function pollSensorState() {
+async function pollSystemState() {
     try {
-        const state = await requestJson('/sensor_state');
-        const distance = state.distance_cm;
-        const distanceText = typeof distance === 'number' ? `${distance.toFixed(1)} cm` : '-- cm';
-
-        document.getElementById('distance-pill').textContent = distanceText;
-        document.getElementById('distance-reading').textContent = typeof distance === 'number' ? distance.toFixed(1) : '--';
-        document.getElementById('distance-detail').textContent = typeof distance === 'number'
-            ? distance < 6 ? 'Inside 6 cm risk band.' : 'Outside immediate stop band.'
-            : 'Waiting for sensor data.';
-        document.getElementById('sensor-mode').textContent = state.status || 'Idle';
-        document.getElementById('sensor-last-updated').textContent = formatSensorTime(state.last_updated);
-        document.getElementById('sensor-raw-line').textContent = state.last_raw || '--';
-
-        const pendingCount = (state.automations || []).filter(item => item.runtime && item.runtime.is_pending).length;
-        document.getElementById('pending-automation-count').textContent = String(pendingCount);
-
-        automationsCache = state.automations || [];
-        renderAutomations();
-
-        const healthy = state.status && !String(state.status).startsWith('error') && state.status !== 'arduino_1_not_connected';
-        setStatus(healthy ? 'Sensor online' : state.status, healthy);
+        const state = await requestJson('/state');
+        applyRuntimeState(state);
     } catch (error) {
         setStatus('Backend unreachable', false);
     }
@@ -632,12 +776,15 @@ function wireControls() {
     document.getElementById('btn-home').addEventListener('click', goHome);
     document.getElementById('btn-save-pos').addEventListener('click', saveCurrentPosition);
     document.getElementById('btn-add-wait').addEventListener('click', addWaitStep);
+    document.getElementById('btn-add-motor-step').addEventListener('click', addMotorStep);
     document.getElementById('btn-clear-wf').addEventListener('click', () => {
         currentWorkflowSequence = [];
         renderWorkflowSequence();
     });
     document.getElementById('btn-save-wf').addEventListener('click', saveWorkflow);
     document.getElementById('btn-run-wf').addEventListener('click', () => runWorkflow());
+    document.getElementById('btn-start-demo').addEventListener('click', startDemoMode);
+    document.getElementById('btn-stop-demo').addEventListener('click', stopDemoMode);
     document.getElementById('btn-save-automation').addEventListener('click', saveAutomation);
     document.getElementById('btn-reset-automation').addEventListener('click', resetAutomationForm);
     document.getElementById('automation-action').addEventListener('change', syncAutomationWorkflowVisibility);
@@ -677,8 +824,8 @@ async function initialize() {
     resetAutomationForm();
     renderWorkflowSequence();
     await Promise.all([loadPositions(), loadWorkflows(), loadAutomations()]);
-    await pollSensorState();
-    sensorPollHandle = window.setInterval(pollSensorState, 750);
+    await pollSystemState();
+    statePollHandle = window.setInterval(pollSystemState, 750);
 }
 
 window.goToPosition = goToPosition;

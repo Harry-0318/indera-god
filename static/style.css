@@ -157,7 +157,7 @@ h1 {
 }
 
 .hero-grid {
-    grid-template-columns: 1.1fr 1fr;
+    grid-template-columns: 1.1fr 1fr 0.9fr;
 }
 
 .workspace-grid {
@@ -314,6 +314,15 @@ h1 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 14px;
     margin-bottom: 14px;
+}
+
+.demo-grid {
+    margin-bottom: 18px;
+}
+
+.demo-meta strong {
+    max-width: 180px;
+    text-align: right;
 }
 
 .field {

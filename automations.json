@@ -8,7 +8,7 @@
         "cooldown_ms": 5000,
         "action_type": "stop_motor",
         "workflow_name": "",
-        "enabled": false
+        "enabled": true
     },
     {
         "id": "e57b75d4-e4e9-4267-910e-bacbcf9fb996",
@@ -19,6 +19,6 @@
         "cooldown_ms": 5000,
         "action_type": "run_workflow",
         "workflow_name": "pd-green",
-        "enabled": false
+        "enabled": true
     }
 ]

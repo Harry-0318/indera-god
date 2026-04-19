@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.yaml
+.venv
 
 positions.json
 workflows.json
